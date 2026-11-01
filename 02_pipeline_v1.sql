@@ -1,0 +1,74 @@
+USE DATABASE CUSTOMER_ANALYTICS_DB;
+USE WAREHOUSE WH_CUSTOMER_ETL;
+
+-- The procedure consumes new customer snapshots and preserves changed values.
+CREATE OR REPLACE PROCEDURE GOLD.LOAD_DIM_CUSTOMER()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+  v_effective_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()::TIMESTAMP_NTZ;
+BEGIN
+  -- Temporary rows are scoped to this procedure's session.
+  CREATE OR REPLACE TEMPORARY TABLE CUSTOMER_INCOMING (
+      CUSTOMER_ID NUMBER,
+      CUSTOMER_NAME VARCHAR(100),
+      CITY VARCHAR(100),
+      MEMBERSHIP_TIER VARCHAR(30)
+  );
+
+  BEGIN TRANSACTION;
+
+  -- Keep the latest snapshot for each customer arriving in this task run.
+  -- Reading the stream through INSERT advances its offset only on COMMIT.
+  INSERT INTO CUSTOMER_INCOMING
+    (CUSTOMER_ID, CUSTOMER_NAME, CITY, MEMBERSHIP_TIER)
+  SELECT CUSTOMER_ID, CUSTOMER_NAME, CITY, MEMBERSHIP_TIER
+  FROM BRONZE.CUSTOMERS_STREAM
+  QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY CUSTOMER_ID
+      ORDER BY SOURCE_UPDATED_AT DESC, SOURCE_RECORD_ID DESC
+  ) = 1;
+
+  -- Close the current version only when at least one business attribute changes.
+  MERGE INTO GOLD.DIM_CUSTOMER tgt
+  USING CUSTOMER_INCOMING src
+     ON tgt.CUSTOMER_ID = src.CUSTOMER_ID AND tgt.IS_CURRENT = TRUE
+  WHEN MATCHED AND (
+       tgt.CUSTOMER_NAME IS DISTINCT FROM src.CUSTOMER_NAME
+    OR tgt.CITY IS DISTINCT FROM src.CITY
+    OR tgt.MEMBERSHIP_TIER IS DISTINCT FROM src.MEMBERSHIP_TIER
+  ) THEN UPDATE SET
+    tgt.VALID_TO = :v_effective_at,
+    tgt.IS_CURRENT = FALSE
+  WHEN NOT MATCHED THEN INSERT
+    (CUSTOMER_ID, CUSTOMER_NAME, CITY, MEMBERSHIP_TIER,
+     VALID_FROM, VALID_TO, IS_CURRENT)
+  VALUES
+    (src.CUSTOMER_ID, src.CUSTOMER_NAME, src.CITY, src.MEMBERSHIP_TIER,
+     :v_effective_at, NULL, TRUE);
+
+  COMMIT;
+  RETURN 'Customer dimension updated';
+EXCEPTION
+  WHEN OTHER THEN
+    ROLLBACK;
+    RAISE;
+END;
+$$;
+
+
+-- A triggered task invokes the procedure whenever the source stream has data.
+-- It does not need a minute-by-minute polling schedule.
+CREATE OR REPLACE TASK GOLD.TASK_LOAD_DIM_CUSTOMER
+  WAREHOUSE = WH_CUSTOMER_ETL
+  WHEN SYSTEM$STREAM_HAS_DATA('CUSTOMER_ANALYTICS_DB.BRONZE.CUSTOMERS_STREAM')
+AS
+  CALL GOLD.LOAD_DIM_CUSTOMER();
+
+-- Tasks are suspended when created; resume to enable automatic processing.
+ALTER TASK GOLD.TASK_LOAD_DIM_CUSTOMER RESUME;
+
+
