@@ -23,6 +23,7 @@ BEGIN
 
   -- Keep the latest snapshot for each customer arriving in this task run.
   -- Reading the stream through INSERT advances its offset only on COMMIT.
+  
   INSERT INTO CUSTOMER_INCOMING
     (CUSTOMER_ID, CUSTOMER_NAME, CITY, MEMBERSHIP_TIER)
   SELECT CUSTOMER_ID, CUSTOMER_NAME, CITY, MEMBERSHIP_TIER
@@ -33,6 +34,7 @@ BEGIN
   ) = 1;
 
   -- Close the current version only when at least one business attribute changes.
+  
   MERGE INTO GOLD.DIM_CUSTOMER tgt
   USING CUSTOMER_INCOMING src
      ON tgt.CUSTOMER_ID = src.CUSTOMER_ID AND tgt.IS_CURRENT = TRUE

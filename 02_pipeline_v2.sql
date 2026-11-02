@@ -124,6 +124,8 @@ EXCEPTION
 END;
 $$;
 
+DELETE FROM BRONZE.CUSTOMERS;
+DELETE FROM GOLD.DIM_CUSTOMER;
 
 -- A triggered task invokes the procedure whenever the source stream has data.
 -- It does not need a minute-by-minute polling schedule.
